@@ -472,7 +472,7 @@ func (zr *ZRequest) doRequest(method, urlStr string) *ZRequest {
 	}
 
 	// dump request
-	if zr.client.flags&FlagLogDetail > 0 {
+	if zr.client.flags&FlagLogOn > 0 && zr.client.flags&FlagLogDetail > 0 {
 		dump, err := httputil.DumpRequestOut(zr.req, zr.client.flags&FlagLogBody > 0)
 		if err != nil {
 			zr.reqDump = []byte(err.Error())
@@ -495,6 +495,9 @@ func (zr *ZRequest) doRequest(method, urlStr string) *ZRequest {
 }
 
 func (zr *ZRequest) log() *ZRequest {
+	if zr.client.flags&FlagLogOn == 0 {
+		return zr
+	}
 	if zr.client.logger == nil {
 		return zr
 	}

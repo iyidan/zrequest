@@ -314,6 +314,42 @@ func TestBeforeHookFunc(t *testing.T) {
 	zr.SetBody("a=1&b=2").Put(dumpURL + "/put")
 }
 
+func BenchmarkGet(b *testing.B) {
+	res := NormalRes{}
+	cli := NewClient(time.Second*30, 0, nil)
+	for i := 0; i < b.N; i++ {
+		err := cli.Open().SetQueryParam("key", "val").Get(dumpURL + "/get").Unmarshal(&res)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if res.Args["key"] != "val" {
+			b.Fatal(`res.Args["key"] != "val"`)
+		}
+	}
+}
+
+func BenchmarkStdHTTPGet(b *testing.B) {
+	res := NormalRes{}
+	for i := 0; i < b.N; i++ {
+		resp, err := http.Get(dumpURL + "/get?key=val")
+		if err != nil {
+			b.Fatal(err)
+		}
+		body, err := ioutil.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			b.Fatal(err)
+		}
+		err = json.Unmarshal(body, &res)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if res.Args["key"] != "val" {
+			b.Fatal(`res.Args["key"] != "val"`)
+		}
+	}
+}
+
 func getFreePort() (string, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -330,13 +366,23 @@ func getFreePort() (string, error) {
 }
 
 func TestMain(m *testing.M) {
+
 	var testLocal bool
+	var inbenchmark bool
 	flag.BoolVar(&testLocal, "local", false, "if passed, will use local server for test")
 	flag.Parse()
 
 	defaultClient = NewClient(time.Second*30, FlagLogOn, nil)
 
-	if !testLocal {
+	for _, v := range os.Args {
+		if strings.Contains(v, "bench=") {
+			inbenchmark = true
+			break
+		}
+	}
+
+	// if not testlocal and not in benchmark, test with online server
+	if !testLocal && !inbenchmark {
 		os.Exit(m.Run())
 		return
 	}
