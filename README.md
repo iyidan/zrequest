@@ -1,43 +1,42 @@
-# zhttpclient
-a httpclient write by golang
+# zrequest
+[![GoDoc](http://img.shields.io/badge/go-documentation-brightgreen.svg?style=flat-square)](https://godoc.org/github.com/iyidan/zrequest)
+[![Go Report](https://goreportcard.com/badge/github.com/iyidan/zrequest)](https://goreportcard.com/badge/github.com/iyidan/zrequest)
+
+a http client written with golang, which is useful and powerful
 ## Example
 ```go
 package main
 
 import (
 	"fmt"
-
-	"github.com/iyidan/zhttpclient"
+	"github.com/iyidan/zrequest"
 )
 
-type httpBinResponse struct {
-	Args        map[string]string `json:"args"`
-	Data        string            `json:"data"`
-	Form        map[string]string `json:"form"`
-	RespHeaders map[string]string `json:"headers"`
-	// more ...
-}
-
-func init() {
-	zhttpclient.LogOn = true
-	zhttpclient.LogBody = true
-	zhttpclient.LogDetail = true
+// HTTPBinResponse The structure of httpbin response
+type HTTPBinResponse struct {
+	Args    map[string]string
+	Data    string
+	Files   map[string]string
+	Form    map[string]string
+	Headers map[string]string
+	JSON    interface{}
+	Origin  string
+	URL     string `json:"url"`
 }
 
 func main() {
-
-	reqBody := map[string]interface{}{
-		"username": "iyidan",
-		"age":      22,
+	// the request data
+	data := map[string]interface{}{"username": "iyidan","age":22}
+	// the response type
+	res := HTTPBinResponse{}
+	// request and unmarshal response into res
+	err := zrequest.Open().SetBody(data).Post("http://httpbin.org/post?arg1=arg1").Unmarshal(&res)
+	// handle error
+	if err != nil {
+		panic(err)
 	}
-	res := httpBinResponse{}
-	err := zhttpclient.Open(). // client with default timeout
-					SetBody(reqBody). // client will auto detect the request content-type
-					Post("http://httpbin.org/post").
-					Unmarshal(&res) // client will marshal response to struct, support xml or json
-
-	fmt.Printf("res: %#v, err: %#v\n", res, err)
+	fmt.Printf("The response is: %#v", res)
 }
 ```
 
-More Examples: See the zhttpclient_test.go 
+More Examples: See the test files *_test.go 

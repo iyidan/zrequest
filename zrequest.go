@@ -66,7 +66,26 @@ var (
 	jsonCheck      = regexp.MustCompile("(?i:[application|text]/json)")
 	xmlCheck       = regexp.MustCompile("(?i:[application|text]/xml)")
 	formDataCheck  = regexp.MustCompile("(?i:(multipart/form\\-data)|(x\\-www\\-form\\-urlencoded))")
+
+	ErrRequestNotComp = errors.New("resp is nil, request not completed")
 )
+
+const (
+	// FlagLogOn determine log on/off
+	FlagLogOn = 1 << iota
+	// FlagLogDetail determine log type (detail or summary)
+	FlagLogDetail
+	// FlagLogBody determine log request/response body
+	// httputil dumpbody into memory
+	// So, be careful of the large body request/response
+	FlagLogBody
+)
+
+// Logger requests log
+type Logger interface {
+	Println(v ...interface{})
+	Printf(format string, v ...interface{})
+}
 
 var (
 	// TransportWithSSLSkipVerify is the default transport which not auth the ssl server
@@ -81,23 +100,15 @@ var (
 		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
 	}
 
-	defaultClient    = NewClient(time.Second * 30)
-	defaultUserAgent = "iyidan/zhttpclient(" + runtime.Version() + ")"
+	// DefaultLogger is a logger default used
+	DefaultLogger = log.New(os.Stderr, "[zrequest]", 0)
 
-	// LogDetail log body and headers, should init it before any client request
-	LogDetail = false
-	LogBody   = false
-	LogOn     = false
+	defaultClient    = NewClient(time.Second*30, FlagLogOn, nil)
+	defaultUserAgent = "iyidan/zrequest(" + runtime.Version() + ")"
 
-	logDumpReqPrefix = []byte("\n#request\n")
-	logDumpResPrefix = []byte("\n\n#response\n")
-	logger           = log.New(os.Stderr, "[zhttpclient]", log.Lshortfile|log.LstdFlags)
+	logDumpReqPrefix = []byte("\n#req\n")
+	logDumpResPrefix = []byte("\n\n#res\n")
 )
-
-// SetLogger set the request output log
-func SetLogger(lg *log.Logger) {
-	logger = lg
-}
 
 // Open defaultClient
 func Open() *ZRequest {
@@ -106,27 +117,44 @@ func Open() *ZRequest {
 
 // ZClient wrapped with http client
 type ZClient struct {
-	c *http.Client
+	c      *http.Client
+	flags  int // for log flags and so on
+	logger Logger
 }
 
 // NewClient all client share the same http.Transport obj
-func NewClient(timeout time.Duration) *ZClient {
+func NewClient(timeout time.Duration, flags int, logger Logger) *ZClient {
+	if logger == nil {
+		logger = DefaultLogger
+	}
 	jar, _ := cookiejar.New(nil)
 	return &ZClient{
 		c: &http.Client{
 			Timeout: timeout,
 			Jar:     jar,
 		},
+		flags:  flags,
+		logger: logger,
 	}
 }
 
-// NewClientWithHttpClient wrapped with a exist http client
-func NewClientWithHttpClient(hc *http.Client) *ZClient {
-	return &ZClient{c: hc}
+// NewClientWithHTTPClient wrapped with a exist http client
+func NewClientWithHTTPClient(hc *http.Client, flags int, logger Logger) *ZClient {
+	if logger == nil {
+		logger = DefaultLogger
+	}
+	return &ZClient{
+		c:      hc,
+		flags:  flags,
+		logger: logger,
+	}
 }
 
 // NewClientWithTransport wrapped with a exist http transport
-func NewClientWithTransport(timeout time.Duration, ts *http.Transport) *ZClient {
+func NewClientWithTransport(timeout time.Duration, ts *http.Transport, flags int, logger Logger) *ZClient {
+	if logger == nil {
+		logger = DefaultLogger
+	}
 	jar, _ := cookiejar.New(nil)
 	return &ZClient{
 		c: &http.Client{
@@ -134,11 +162,16 @@ func NewClientWithTransport(timeout time.Duration, ts *http.Transport) *ZClient 
 			Transport: ts,
 			Jar:       jar,
 		},
+		flags:  flags,
+		logger: logger,
 	}
 }
 
 // NewClientWithSSLSkipVerify client not auth ssl server
-func NewClientWithSSLSkipVerify(timeout time.Duration) *ZClient {
+func NewClientWithSSLSkipVerify(timeout time.Duration, flags int, logger Logger) *ZClient {
+	if logger == nil {
+		logger = DefaultLogger
+	}
 	jar, _ := cookiejar.New(nil)
 	return &ZClient{
 		c: &http.Client{
@@ -146,10 +179,13 @@ func NewClientWithSSLSkipVerify(timeout time.Duration) *ZClient {
 			Transport: TransportWithSSLSkipVerify,
 			Jar:       jar,
 		},
+		flags:  flags,
+		logger: logger,
 	}
 }
 
 // Open a request
+// Notice: the request obj should only used in one goroutine
 func (c *ZClient) Open() *ZRequest {
 	zr := ZRequest{
 		query:   url.Values{},
@@ -159,6 +195,7 @@ func (c *ZClient) Open() *ZRequest {
 	return zr.SetUserAgent(defaultUserAgent)
 }
 
+// ZRequest this struct used for a single-http-roundtrip
 type ZRequest struct {
 	method string
 	urlStr string
@@ -191,57 +228,94 @@ type ZRequest struct {
 	err error
 
 	BeforeHookFunc func(*ZRequest) error
+
+	ended bool // true means the request ended
 }
 
 // EnableAtUpload enable '@' prefix to upload a file, default is false
 func (zr *ZRequest) EnableAtUpload() *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	zr.atUploadFlag = true
 	return zr
 }
 
 // DisableAtUpload enable '@' prefix to upload a file, default is false
 func (zr *ZRequest) DisableAtUpload() *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	zr.atUploadFlag = false
 	return zr
 }
 
+// SetHeader set a request header
 func (zr *ZRequest) SetHeader(key, value string) *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	zr.headers.Set(key, value)
 	return zr
 }
 
+// SetHeaders set multi request header(replace)
 func (zr *ZRequest) SetHeaders(headers map[string]string) *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	for key, value := range headers {
 		zr.headers.Set(key, value)
 	}
 	return zr
 }
 
+// GetHeader get the request header
 func (zr *ZRequest) GetHeader() http.Header {
 	return zr.headers
 }
 
+// SetUserAgent set the request ua
 func (zr *ZRequest) SetUserAgent(ua string) *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	zr.headers.Set(HdrUserAgent, ua)
 	return zr
 }
 
+// SetContentType set the request Content-Type
 func (zr *ZRequest) SetContentType(contentType string) *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	zr.headers.Set(HdrContentType, contentType)
 	return zr
 }
 
+// SetCookie set a request cookie (append)
 func (zr *ZRequest) SetCookie(ck *http.Cookie) *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	zr.cookies = append(zr.cookies, ck)
 	return zr
 }
 
+// SetCookies set request cookies
 func (zr *ZRequest) SetCookies(cks []*http.Cookie) *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	zr.cookies = append(zr.cookies, cks...)
 	return zr
 }
 
+// SetCookieString set request cookies with given str
 func (zr *ZRequest) SetCookieString(str string) *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	str = strings.Trim(strings.TrimSpace(str), ";")
 	lst := strings.Split(str, "; ")
 	for _, v := range lst {
@@ -253,76 +327,114 @@ func (zr *ZRequest) SetCookieString(str string) *ZRequest {
 	return zr
 }
 
+// SetBasicAuth set a 401 authentication (replace)
 func (zr *ZRequest) SetBasicAuth(username, password string) *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	zr.basicAuthUsername = username
 	zr.basicAuthPassword = password
 	return zr
 }
 
+// SetQueryParam set a query param (replace)
 func (zr *ZRequest) SetQueryParam(key, value string) *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	zr.query.Set(key, value)
 	return zr
 }
 
+// SetQueryParams set query params (replace)
 func (zr *ZRequest) SetQueryParams(params map[string]string) *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	for key, value := range params {
 		zr.query.Set(key, value)
 	}
 	return zr
 }
 
+// SetQueryParamAny set a query params with any type
 func (zr *ZRequest) SetQueryParamAny(key string, value interface{}) *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	zr.query.Set(key, AnyToString(value))
 	return zr
 }
 
+// SetQueryParamsAny set  query params with any type
 func (zr *ZRequest) SetQueryParamsAny(params map[string]interface{}) *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	for key, value := range params {
 		zr.SetQueryParamAny(key, value)
 	}
 	return zr
 }
 
+// SetBody set the request body
 func (zr *ZRequest) SetBody(body interface{}) *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	zr.body = body
 	return zr
 }
 
+// GetBodyBuf get the request bodybuf
 func (zr *ZRequest) GetBodyBuf() io.Reader {
 	return zr.bodyBuf
 }
 
+// SetBodyBuf set the request bodybuf
 func (zr *ZRequest) SetBodyBuf(buf io.Reader) *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	zr.bodyBuf = buf
 	return zr
 }
 
-func (zr *ZRequest) GetUrlStr() string {
+// GetURLStr set the request urlStr
+func (zr *ZRequest) GetURLStr() string {
 	return zr.urlStr
 }
 
-func (zr *ZRequest) SetUrlStr(urlStr string) *ZRequest {
+// SetURLStr set the request urlStr
+func (zr *ZRequest) SetURLStr(urlStr string) *ZRequest {
+	if zr.ended {
+		return zr
+	}
 	zr.urlStr = urlStr
 	return zr
 }
 
-func (zr *ZRequest) doRequest(method, urlStr string) *ZRequest {
+func (zr *ZRequest) setEnd() {
+	zr.ended = true
+}
 
+// process a request
+func (zr *ZRequest) doRequest(method, urlStr string) *ZRequest {
 	zr.method = method
 
 	// queryParams
 	if len(zr.query) > 0 {
-		reqUrl, err := url.Parse(urlStr)
+		reqURL, err := url.Parse(urlStr)
 		if err != nil {
 			zr.err = err
 			return zr
 		}
-		query := reqUrl.Query()
-		for k, _ := range zr.query {
+		query := reqURL.Query()
+		for k := range zr.query {
 			query.Set(k, zr.query.Get(k))
 		}
-		reqUrl.RawQuery = query.Encode()
-		urlStr = reqUrl.String()
+		reqURL.RawQuery = query.Encode()
+		urlStr = reqURL.String()
 	}
 	zr.urlStr = urlStr
 
@@ -360,8 +472,8 @@ func (zr *ZRequest) doRequest(method, urlStr string) *ZRequest {
 	}
 
 	// dump request
-	if LogDetail {
-		dump, err := httputil.DumpRequestOut(zr.req, LogBody)
+	if zr.client.flags&FlagLogDetail > 0 {
+		dump, err := httputil.DumpRequestOut(zr.req, zr.client.flags&FlagLogBody > 0)
 		if err != nil {
 			zr.reqDump = []byte(err.Error())
 		} else {
@@ -383,63 +495,101 @@ func (zr *ZRequest) doRequest(method, urlStr string) *ZRequest {
 }
 
 func (zr *ZRequest) log() *ZRequest {
+	if zr.client.logger == nil {
+		return zr
+	}
 	if zr.err != nil {
-		logger.Println(zr.Duration().String(), "-", zr.RespStatusCode(), "-", zr.method, zr.urlStr, "-", zr.err.Error())
+		zr.client.logger.Printf(
+			" %3d - %s %s - %s - err: %s",
+			zr.RespStatusCode(), zr.method, zr.urlStr, zr.Duration().String(), zr.err.Error())
 		return zr
 	}
 
 	var detail []byte
-	if LogDetail {
+	if zr.client.flags&FlagLogDetail > 0 {
 		detail = append(detail, logDumpReqPrefix...)
 		detail = append(detail, zr.reqDump...)
 		detail = append(detail, logDumpResPrefix...)
-		dresp, _ := httputil.DumpResponse(zr.resp, LogBody)
+		dresp, _ := httputil.DumpResponse(zr.resp, zr.client.flags&FlagLogBody > 0)
 		detail = append(detail, dresp...)
+		zr.client.logger.Printf(
+			" %3d - %s %s - %s - %s",
+			zr.RespStatusCode(), zr.method, zr.req.URL.String(), zr.Duration().String(), detail)
+	} else {
+		zr.client.logger.Printf(
+			" %3d - %s %s - %s",
+			zr.RespStatusCode(), zr.method, zr.req.URL.String(), zr.Duration().String())
 	}
-	logger.Println(zr.Duration().String(), "-", zr.RespStatusCode(), "-", zr.method, zr.req.URL.String(), "-", string(detail))
 	return zr
 }
 
+// Do do a request
 func (zr *ZRequest) Do(method, urlStr string) *ZRequest {
+	if zr.ended {
+		return zr
+	}
+	defer zr.setEnd()
 	return zr.doRequest(method, urlStr).log()
 }
 
+// Get request
 func (zr *ZRequest) Get(urlStr string) *ZRequest {
 	return zr.Do(GET, urlStr)
 }
+
+// Post request
 func (zr *ZRequest) Post(urlStr string) *ZRequest {
 	return zr.Do(POST, urlStr)
 }
+
+// Put request
 func (zr *ZRequest) Put(urlStr string) *ZRequest {
 	return zr.Do(PUT, urlStr)
 }
+
+// Delete request
 func (zr *ZRequest) Delete(urlStr string) *ZRequest {
 	return zr.Do(DELETE, urlStr)
 }
+
+// Patch request
 func (zr *ZRequest) Patch(urlStr string) *ZRequest {
 	return zr.Do(PATCH, urlStr)
 }
+
+// Head request
 func (zr *ZRequest) Head(urlStr string) *ZRequest {
 	return zr.Do(HEAD, urlStr)
 }
+
+// Options request
 func (zr *ZRequest) Options(urlStr string) *ZRequest {
 	return zr.Do(OPTIONS, urlStr)
 }
 
 // Resp get raw response , the response.Body is not closed
+// You should close the response body
 func (zr *ZRequest) Resp() (*http.Response, error) {
-	if zr.resp == nil {
-		return nil, errors.New("resp is nil, request not completed")
+	if !zr.ended {
+		return nil, ErrRequestNotComp
 	}
 	return zr.resp, zr.err
 }
 
+// RespBody response body
 func (zr *ZRequest) RespBody() ([]byte, error) {
+	if !zr.ended {
+		return nil, ErrRequestNotComp
+	}
 	parseRespBody(zr)
 	return zr.respBody, zr.err
 }
 
+// RespBodyString response body as string
 func (zr *ZRequest) RespBodyString() (string, error) {
+	if !zr.ended {
+		return "", ErrRequestNotComp
+	}
 	parseRespBody(zr)
 	if zr.err != nil {
 		return "", zr.err
@@ -447,6 +597,7 @@ func (zr *ZRequest) RespBodyString() (string, error) {
 	return string(zr.respBody), nil
 }
 
+// RespHeader response header
 func (zr *ZRequest) RespHeader(key string) string {
 	if zr.resp == nil {
 		return ""
@@ -454,6 +605,7 @@ func (zr *ZRequest) RespHeader(key string) string {
 	return zr.resp.Header.Get(key)
 }
 
+// RespHeaders response headers
 func (zr *ZRequest) RespHeaders() http.Header {
 	if zr.resp == nil {
 		return nil
@@ -461,6 +613,7 @@ func (zr *ZRequest) RespHeaders() http.Header {
 	return zr.resp.Header
 }
 
+// RespCookies response cookies
 func (zr *ZRequest) RespCookies() []*http.Cookie {
 	if zr.resp == nil {
 		return nil
@@ -468,6 +621,7 @@ func (zr *ZRequest) RespCookies() []*http.Cookie {
 	return zr.resp.Cookies()
 }
 
+// RespStatusCode response status code
 func (zr *ZRequest) RespStatusCode() int {
 	if zr.resp == nil {
 		return 0
@@ -475,6 +629,7 @@ func (zr *ZRequest) RespStatusCode() int {
 	return zr.resp.StatusCode
 }
 
+// RespStatus response status text
 func (zr *ZRequest) RespStatus() string {
 	if zr.resp == nil {
 		return ""
@@ -482,39 +637,47 @@ func (zr *ZRequest) RespStatus() string {
 	return zr.resp.Status
 }
 
+// Unmarshal unmarshal respone(xml or json) into v
 func (zr *ZRequest) Unmarshal(v interface{}) error {
+	if !zr.ended {
+		return ErrRequestNotComp
+	}
 	if zr.resp == nil {
 		if zr.err != nil {
 			return zr.err
 		}
-		return errors.New("resp is nil, request not completed")
+		return ErrRequestNotComp
 	}
-	if zr.resp.StatusCode > 199 && zr.resp.StatusCode < 300 {
-		parseRespBody(zr)
+
+	parseRespBody(zr)
+
+	if zr.err != nil {
+		return zr.err
+	}
+	respContentType := zr.resp.Header.Get(HdrContentType)
+	// xml
+	if xmlCheck.MatchString(respContentType) {
+		zr.err = xml.Unmarshal(zr.respBody, v)
 		if zr.err != nil {
+			zr.err = errors.New("xml.Unmarshal: " + zr.err.Error())
 			return zr.err
 		}
-		respContentType := zr.resp.Header.Get(HdrContentType)
-		if xmlCheck.MatchString(respContentType) {
-			zr.err = xml.Unmarshal(zr.respBody, v)
-			if zr.err != nil {
-				zr.err = errors.New("xml.Unmarshal: " + zr.err.Error())
-				return zr.err
-			}
-			return nil
-		} else {
-			zr.err = json.Unmarshal(zr.respBody, v)
-			if zr.err != nil {
-				zr.err = errors.New("json.Unmarshal: " + zr.err.Error())
-				return zr.err
-			}
-			return nil
-		}
+		return nil
 	}
-	return errors.New(zr.resp.Status)
+	// default json
+	zr.err = json.Unmarshal(zr.respBody, v)
+	if zr.err != nil {
+		zr.err = errors.New("json.Unmarshal: " + zr.err.Error())
+		return zr.err
+	}
+	return nil
 }
 
+// Duration return the request cost time
 func (zr *ZRequest) Duration() time.Duration {
+	if zr.endTime.IsZero() {
+		return 0
+	}
 	return zr.endTime.Sub(zr.startTime)
 }
 
@@ -534,6 +697,7 @@ func parseRespBody(zr *ZRequest) {
 	zr.respBody, zr.err = ioutil.ReadAll(zr.resp.Body)
 }
 
+// AnyToString any type parse into string
 func AnyToString(i interface{}) string {
 
 	value := reflect.ValueOf(i)
@@ -568,7 +732,6 @@ func AnyToString(i interface{}) string {
 }
 
 func parseRequestBody(zr *ZRequest) {
-
 	if zr.err != nil {
 		return
 	}
@@ -589,9 +752,13 @@ RETRY:
 		goto RETRY
 
 	} else if bbody, ok := zr.body.([]byte); ok {
+		if contentType == "" {
+			zr.SetHeader(HdrContentType, FormContentType)
+		}
 		zr.bodyBuf = bytes.NewBuffer(bbody)
 
 	} else if kind == reflect.String {
+		// if data is a json-like string, should set the Content-Type header to avoid this
 		if contentType == "" {
 			zr.SetHeader(HdrContentType, FormContentType)
 		}

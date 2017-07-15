@@ -2,46 +2,39 @@ package zrequest
 
 import (
 	"bytes"
+	"context"
+	"crypto/md5"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
+	"fmt"
 	"io/ioutil"
-	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
 
-/*
-<?php
-if (!isset($_SERVER['PHP_AUTH_USER'])) {
-    header('WWW-Authenticate: Basic realm="My Realm"');
-    header('HTTP/1.1 401 Unauthorized');
-    echo 'Text to send if user hits Cancel button';
-    exit;
-} elseif($_SERVER['PHP_AUTH_PW'] != "123456" || $_SERVER['PHP_AUTH_USER'] != "liwei") {
-    header('HTTP/1.1 403 forbidden');
-    echo "forbidden";
-    exit;
+type NormalRes struct {
+	Args    map[string]string
+	Data    string
+	Files   map[string]string
+	Form    map[string]string
+	Headers map[string]string
+	JSON    User `json:"json"` // use User struct for test
+	Origin  string
+	URL     string `json:"url"`
 }
-$emptyObj = new stdClass();
-echo json_encode(array(
-    "GET" => count($_GET) > 0 ? $_GET : $emptyObj,
-    "POST" => count($_POST) > 0 ? $_POST : $emptyObj,
-    "rawBody" => file_get_contents("php://input"),
-    "COOKIE" => count($_COOKIE) > 0 ? $_COOKIE : $emptyObj,
-    "FILES" => count($_FILES) > 0 ? $_FILES : $emptyObj,
-    "SERVER" => $_SERVER,
-));
-?>
-*/
-type DumpStruct struct {
-	GET     map[string]string
-	POST    map[string]string
-	RawBody string `json:"rawBody"`
-	COOKIE  map[string]string
-	FILES   map[string]map[string]interface{}
-	SERVER  map[string]interface{}
+
+type CookieGetRes struct {
+	Cookies map[string]string
 }
 
 type User struct {
@@ -50,63 +43,126 @@ type User struct {
 	Male bool
 }
 
-var dumpUrl = "http://php.localhost.com/dumprequest.php?v=1"
-var timeoutUrl = "http://php.localhost.com/timeout.php"
+type BasicAuthRes struct {
+	Authenticated bool
+	User          string
+}
 
-// ---------- start ------ //
+var (
+	// upload imgFile test
+	imgFile = filepath.Join(os.Getenv("GOPATH"), "src", "github.com", "iyidan", "zrequest", "testuploadfile.png")
+
+	// httpbin for test http client
+	dumpURL = "http://httpbin.org"
+
+	// cmdContext is used for run a local server for test
+	// when test completed
+	cmdContext context.Context
+)
+
+func TestBasicAuth(t *testing.T) {
+	res := BasicAuthRes{}
+	err := Open().
+		SetBasicAuth("uname", "upwd").
+		Get(dumpURL + "/basic-auth/uname/upwd").Unmarshal(&res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Authenticated != true || res.User != "uname" {
+		t.Fatal(`res.Authenticated != true || res.User != "uname"`)
+	}
+}
 
 func TestGet(t *testing.T) {
-
-	res := DumpStruct{}
-	err := Open().SetQueryParam("v2", "v2").SetQueryParamAny("v3", 3).
-		SetCookie(&http.Cookie{Name: "testcookie", Value: "testcookiev"}).
-		SetCookieString(" cka=ckav; ckb=ckbv;").
+	queryParams := map[string]interface{}{
+		"v2":    "v2",
+		"v3":    3,
+		"float": 32.11,
+		"ids":   "1,2,31",
+	}
+	cookie := &http.Cookie{Name: "testcookie", Value: "testcookiev"}
+	cookieStr := " cka=ckav; ckb=ckbv;"
+	headers := map[string]string{
+		"Testhd1": "testhdv1",
+		"Testhd2": "testhdv2",
+	}
+	res := NormalRes{}
+	err := Open().SetQueryParam("single1", "single1").SetQueryParamAny("single2", 2).
+		SetQueryParamsAny(queryParams).
+		SetCookie(cookie).
+		SetCookieString(cookieStr).
 		SetHeader("testhd", "testhdv").
-		SetBasicAuth("liwei", "123456").
-		Get(dumpUrl).Unmarshal(&res)
+		SetHeaders(headers).
+		Get(dumpURL + "/get?ori=1").Unmarshal(&res)
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	t.Logf("getres: %#v\n", res)
+
 	// query param
-	if res.GET["v2"] != "v2" {
-		t.Fatal(`res.GET["v2"] != "v2"`)
+	if res.Args["ori"] != "1" {
+		t.Fatal(`res.Args["ori"] != "1"`)
 	}
-	if len(res.POST) != 0 {
-		t.Fatal(`len(res.POST) != 0`)
+	if res.Args["single1"] != "single1" {
+		t.Fatal(`res.Args["single1"] != "single1"`)
 	}
-
-	// cookie
-	if res.COOKIE["testcookie"] != "testcookiev" {
-		t.Fatal(`res.COOKIE["testcookie"] != "testcookiev"`)
+	if res.Args["single2"] != "2" {
+		t.Fatal(`res.Args["single2"] != "2"`)
 	}
-	if res.COOKIE["cka"] != "ckav" {
-		t.Fatal(`res.COOKIE["cka"] != "ckav"`)
-	}
-	if res.COOKIE["ckb"] != "ckbv" {
-		t.Fatal(`res.COOKIE["ckb"] != "ckbv"`)
+	for k, v := range queryParams {
+		if rv, ok := res.Args[k]; !ok || rv != fmt.Sprintf("%v", v) {
+			t.Fatalf("res.Args[%s] != %v, res=%s, ok:%t", k, v, rv, ok)
+		}
 	}
 
-	// header
-	if res.SERVER["HTTP_TESTHD"].(string) != "testhdv" {
-		t.Fatal(`res.SERVER["HTTP_TESTHD"].(string) != "testhdv"`)
+	resCookieStr := res.Headers["Cookie"]
+	if !strings.Contains(resCookieStr, "testcookie=testcookiev") {
+		t.Fatal(`!strings.Contains(resCookieStr, "testcookie=testcookiev")`)
+	}
+	if !strings.Contains(resCookieStr, "cka=ckav") {
+		t.Fatal(`!strings.Contains(resCookieStr, "ckb=ckbv")`)
+	}
+	if !strings.Contains(resCookieStr, "ckb=ckbv") {
+		t.Fatal(`!strings.Contains(resCookieStr, "ckb=ckbv")`)
+	}
+
+	for k, v := range headers {
+		if rv, ok := res.Headers[k]; !ok || rv != v {
+			t.Fatalf("res.Headers[%s] != %s, res=%s, ok:%t", k, v, rv, ok)
+		}
+	}
+	if res.Headers["Testhd"] != "testhdv" {
+		t.Fatal(`res.Headers["testhd"] != "testhdv"`)
+	}
+}
+
+func TestSetCookie(t *testing.T) {
+	res := CookieGetRes{}
+	zr := Open()
+	err := zr.Get(dumpURL + "/cookies/set?ckname=ckvalue").Unmarshal(&res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Cookies["ckname"] != "ckvalue" {
+		t.Fatal(`res.Cookies["ckname"] != "ckvalue"`)
 	}
 }
 
 func TestSendRawBody(t *testing.T) {
 	raw := "aaaa"
 
-	res := DumpStruct{}
+	res := NormalRes{}
 	err := Open().
-		SetBasicAuth("liwei", "123456").
 		SetBody(raw).
-		Post(dumpUrl).Unmarshal(&res)
+		SetContentType("application/octet-stream").
+		Post(dumpURL + "/post?abc=va").Unmarshal(&res)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if res.RawBody != raw {
-		t.Fatal(`res.RawBody != raw`)
+	if res.Data != raw {
+		t.Fatal(`res.Data != raw`)
 	}
 }
 
@@ -115,86 +171,107 @@ func TestSendJSONBody(t *testing.T) {
 	bodyBytes, _ := json.Marshal(body)
 
 	testBodys := []interface{}{
-		&User{Name: "liwei", Age: 28, Male: true},
-		User{Name: "liwei", Age: 28, Male: true},
+		body,
+		*body,
 		bodyBytes,
-		`{"Name":"liwei","Age":28,"Male":true}`,
-		bytes.NewBufferString(`{"Name":"liwei","Age":28,"Male":true}`),
+		string(bodyBytes),
+		bytes.NewBufferString(string(bodyBytes)),
 	}
 
 	for k, v := range testBodys {
-		res := DumpStruct{}
+		res := NormalRes{}
 		err := Open().
-			SetBasicAuth("liwei", "123456").
 			SetBody(v).
-			//SetContentType(JSONContentType).
-			Post(dumpUrl).Unmarshal(&res)
+			SetContentType(JSONContentType).
+			Post(dumpURL + "/post?v=jsontest").Unmarshal(&res)
 		if err != nil {
 			t.Fatal(k, err)
 		}
-		t.Log("res.RawBody:", k, res.RawBody)
-		if res.RawBody != string(bodyBytes) {
-			t.Fatal(k, `res.RawBody != bodyStr`)
+		t.Log("res.JSON:", k, res.JSON)
+		if !reflect.DeepEqual(res.JSON, *body) {
+			t.Fatalf("res.JSON not match test json: res.JSON=%#v, testJSON=%#v\n", res.JSON, *body)
 		}
 	}
 }
 
 func TestSendFormBody(t *testing.T) {
+	correctForm := map[string]string{"a": "a", "b": "1", "c": "true"}
 	testBodys := []interface{}{
-		map[string]string{"posta": "postav", "postb": "postbv"},
-		map[string]interface{}{"posta": "postav", "postb": 1, "postc": true},
+		correctForm,
+		map[string]interface{}{"a": "a", "b": 1, "c": true},
+		"a=a&b=1&c=true",
+		[]byte("a=a&b=1&c=true"),
 	}
-
 	for k, v := range testBodys {
-		res := DumpStruct{}
+		res := NormalRes{}
 		err := Open().
-			SetBasicAuth("liwei", "123456").
 			SetBody(v).
-			Post(dumpUrl).Unmarshal(&res)
+			Post(dumpURL + "/post?qk=qk").Unmarshal(&res)
 		if err != nil {
 			t.Fatal(k, err)
 		}
-		t.Log("res.POST:", k, res.POST)
+		if !reflect.DeepEqual(correctForm, res.Form) {
+			t.Fatalf("res.Form not correct, res.Form=%#v, correct=%#v\n", res.Form, correctForm)
+		}
 	}
 }
 
 func TestTimeoutErr(t *testing.T) {
-	cli := NewClient(time.Second * 2)
-	body, err := cli.Open().SetQueryParamAny("sec", 3).Get(timeoutUrl).RespBody()
+	cli := NewClient(time.Second*2, FlagLogOn, nil)
+	body, err := cli.Open().Get(dumpURL + "/delay/3").RespBody()
 	if !IsTimeout(err) {
 		t.Fatal("err is not timeout err", err, err.Error())
 	}
-	t.Logf("timeout request ret: %#v, %s", err, body)
+	t.Logf("timeout request ret: %#v, %s\n", err, body)
+
+	res := NormalRes{}
+	err = cli.Open().Get(dumpURL + "/delay/3").Unmarshal(&res)
+	if !IsTimeout(err) {
+		t.Fatal("err is not timeout err", err, err.Error())
+	}
+	t.Logf("timeout request res: %#v, %#v\n", err, res)
 }
 
 func TestSendFileBody(t *testing.T) {
-	imgFile := "/Users/liwei/Documents/images/FullSizeRender.jpg"
+	cli := NewClient(time.Second*20, FlagLogOn, nil)
 
 	testBodys := []interface{}{
 		map[string]interface{}{"posta": "postav", "postb": 1, "postc": true, "@file1": imgFile},
 	}
 
 	for k, v := range testBodys {
-		res := DumpStruct{}
-		err := Open().
+		res := NormalRes{}
+		err := cli.Open().
 			EnableAtUpload().
 			//DisableAtUpload().
-			SetBasicAuth("liwei", "123456").
 			SetBody(v).
 			SetQueryParam("func", "TestSendFileBody").
-			Post(dumpUrl).Unmarshal(&res)
+			Post(dumpURL + "/post").Unmarshal(&res)
 		if err != nil {
 			t.Fatal(k, err)
 		}
-		t.Log("res.FILES:", k, res.FILES)
+		base64Data := strings.Split(res.Files["file1"], ",")[1]
+		rawData, err := base64.StdEncoding.DecodeString(base64Data)
+		if err != nil {
+			t.Fatal(k, err)
+		}
+		h := md5.New()
+		h.Write(rawData)
+		resMD5 := hex.EncodeToString(h.Sum(nil))
+		imgData, _ := ioutil.ReadFile(imgFile)
+		h.Reset()
+		h.Write(imgData)
+		imgMD5 := hex.EncodeToString(h.Sum(nil))
+		if imgMD5 != resMD5 {
+			t.Fatal(k, `imgMD5 != resMD5`)
+		}
 	}
 }
 
 func TestRawResp(t *testing.T) {
 	resp, err := Open().
-		SetBasicAuth("liwei", "123456").
 		SetQueryParam("func", "TestRawResp").
-		Post(dumpUrl).Resp()
+		Delete(dumpURL + "/delete").Resp()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,16 +281,15 @@ func TestRawResp(t *testing.T) {
 		t.Fatal(err)
 	} else {
 		t.Log(string(body))
-		res := DumpStruct{}
+		res := NormalRes{}
 		err = json.Unmarshal(body, &res)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if res.GET["func"] != "TestRawResp" {
-			t.Fatal(`res.GET["func"] != "TestRawResp"`)
+		if res.Args["func"] != "TestRawResp" {
+			t.Fatal(`res.Args["func"] != "TestRawResp"`)
 		}
 	}
-
 }
 
 func TestBeforeHookFunc(t *testing.T) {
@@ -221,38 +297,79 @@ func TestBeforeHookFunc(t *testing.T) {
 	zr.BeforeHookFunc = func(zr *ZRequest) error {
 		return errors.New("test hook")
 	}
-	err := zr.Get(dumpUrl)
+	_, err := zr.Get(dumpURL + "/get").Resp()
 	if err == nil {
 		t.Fatal("beforefunc err not returned")
+	} else if err.Error() != "test hook" {
+		t.Fatal("beforefunc", `err.Error() != "test hook"`)
 	}
 	t.Log(err)
 
 	zr = Open()
 	zr.BeforeHookFunc = func(zr *ZRequest) error {
-		log.Printf("####contentType:%s\n", zr.headers.Get(HdrContentType))
-		log.Printf("####bodybuf:%#v\n", zr.GetBodyBuf())
+		t.Logf("####contentType:%s\n", zr.headers.Get(HdrContentType))
+		t.Logf("####bodybuf:%#v\n", zr.GetBodyBuf())
 		return nil
 	}
-	zr.SetBody("a=1&b=2").Post(dumpUrl)
+	zr.SetBody("a=1&b=2").Put(dumpURL + "/put")
 }
 
-func TestSetLogger(t *testing.T) {
-	SetLogger(log.New(os.Stderr, "test-zhttpclient", log.Lshortfile|log.LstdFlags))
-	Open().SetBasicAuth("liwei", "123456").SetQueryParam("v2", "v2").SetQueryParamAny("v3", 3).Get(dumpUrl).RespBodyString()
-}
-
-func BenchmarkLog(b *testing.B) {
-	b.StopTimer()
-
-	b.StartTimer()
-	for i := 0; i < b.N; i++ {
-		Open().SetBasicAuth("liwei", "123456").SetQueryParam("v2", "v2").SetQueryParamAny("v3", 3).Get(dumpUrl).RespBodyString()
+func getFreePort() (string, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
 	}
-	b.StopTimer()
+	defer listener.Close()
+
+	addr := listener.Addr().String()
+	_, portString, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", err
+	}
+	return portString, nil
 }
 
-func init() {
-	LogBody = false
-	LogDetail = false
-	LogOn = true
+func TestMain(m *testing.M) {
+	var testLocal bool
+	flag.BoolVar(&testLocal, "local", false, "if passed, will use local server for test")
+	flag.Parse()
+
+	defaultClient = NewClient(time.Second*30, FlagLogOn|FlagLogDetail|FlagLogBody, nil)
+
+	if !testLocal {
+		os.Exit(m.Run())
+		return
+	}
+
+	fmt.Printf("\n########################\n")
+	fmt.Println("We will run a local http server(httpbin) to test zrequest")
+	fmt.Println("The httpbin app is written with python")
+	fmt.Println("You need to install the httpbin and gunicorn before test")
+	fmt.Println("Home page: http://httpbin.org")
+
+	freePort, err := getFreePort()
+	if err != nil {
+		panic("get free port failed:" + err.Error())
+	}
+
+	fmt.Println("httpbin listen on: localhost:" + freePort)
+	fmt.Println("run command: gunicorn -b localhost:"+freePort, "httpbin:app")
+	fmt.Printf("########################\n\n")
+
+	dumpURL = "http://localhost:" + freePort
+
+	ctx, cancelf := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, "gunicorn", "-b localhost:"+freePort, "httpbin:app")
+	go func() {
+		output, err := cmd.CombinedOutput()
+		fmt.Printf("run httpbin: %s, %s\n", output, err)
+	}()
+
+	// waiting for gunicorn running
+	time.Sleep(5 * time.Second)
+
+	exitCode := m.Run()
+	cancelf()
+	time.Sleep(3 * time.Second)
+	os.Exit(exitCode)
 }
