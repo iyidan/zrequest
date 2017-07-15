@@ -2,7 +2,33 @@
 [![GoDoc](http://img.shields.io/badge/go-documentation-brightgreen.svg?style=flat-square)](https://godoc.org/github.com/iyidan/zrequest)
 [![Go Report](https://goreportcard.com/badge/github.com/iyidan/zrequest)](https://goreportcard.com/badge/github.com/iyidan/zrequest)
 
-a http client written with golang, which is useful and powerful
+A http client written with golang
+## Install
+* directly install
+```bash
+go get -u github.com/iyidan/zrequest
+```
+* use [govendor](https://github.com/kardianos/govendor) package manager
+```bash
+cd $GOPATH/src/mysomeproject
+govendor fetch github.com/iyidan/zrequest@v1.0.1
+```
+## Tests
+* test with online server (http://httpbin.org)
+```bash
+go test github.com/iyidan/zrequest
+# go test -v github.com/iyidan/zrequest
+```
+* test with local server(need python environment)
+```bash
+pip install httpbin
+pip install gunicorn
+go test -local github.com/iyidan/zrequest
+# go test -v -local github.com/iyidan/zrequest
+```
+## Docs
+See the [godoc](https://godoc.org/github.com/iyidan/zrequest) for more information
+
 ## Example
 ```go
 package main
@@ -39,4 +65,4 @@ func main() {
 }
 ```
 
-More Examples: See the test files *_test.go 
+More Examples: See the test files *_test.go

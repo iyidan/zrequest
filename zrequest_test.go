@@ -334,7 +334,7 @@ func TestMain(m *testing.M) {
 	flag.BoolVar(&testLocal, "local", false, "if passed, will use local server for test")
 	flag.Parse()
 
-	defaultClient = NewClient(time.Second*30, FlagLogOn|FlagLogDetail|FlagLogBody, nil)
+	defaultClient = NewClient(time.Second*30, FlagLogOn, nil)
 
 	if !testLocal {
 		os.Exit(m.Run())
