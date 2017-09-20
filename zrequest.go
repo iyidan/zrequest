@@ -460,6 +460,9 @@ func (zr *ZRequest) doRequest(method, urlStr string) *ZRequest {
 
 	// headers
 	zr.req.Header = zr.headers
+	if hosthdr := zr.headers.Get("Host"); len(hosthdr) > 0 {
+		zr.req.Host = hosthdr
+	}
 
 	//  HTTP Basic Authentication
 	if zr.basicAuthUsername != "" {
