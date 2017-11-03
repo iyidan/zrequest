@@ -11,7 +11,7 @@ go get -u github.com/iyidan/zrequest
 * use [govendor](https://github.com/kardianos/govendor) package manager
 ```bash
 cd $GOPATH/src/mysomeproject
-govendor fetch github.com/iyidan/zrequest@v1.0.1
+govendor fetch github.com/iyidan/zrequest@v1.0.2
 ```
 ## Tests
 * test with online server (http://httpbin.org)
