@@ -49,8 +49,9 @@ type BasicAuthRes struct {
 }
 
 var (
+	wd, err = os.Getwd()
 	// upload imgFile test
-	imgFile = filepath.Join(os.Getenv("GOPATH"), "src", "github.com", "iyidan", "zrequest", "testuploadfile.png")
+	imgFile = filepath.Join(wd, "testuploadfile.png")
 
 	// httpbin for test http client
 	dumpURL = "http://httpbin.org"
