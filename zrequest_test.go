@@ -315,6 +315,37 @@ func TestBeforeHookFunc(t *testing.T) {
 	zr.SetBody("a=1&b=2").Put(dumpURL + "/put")
 }
 
+func TestRespBodyN(t *testing.T) {
+	cli := NewClient(time.Second*30, 0, nil)
+	zr := cli.Open()
+	body, err := zr.SetQueryParam("key", "val").Get(dumpURL + "/get").RespBodyN(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "{" {
+		t.Fatal(err)
+	}
+	bodyLeft, err := ioutil.ReadAll(zr.resp.Body)
+	if err == nil {
+		t.Fatal("read on closed body not return error")
+	}
+	t.Logf("err: %#v", err)
+	if len(bodyLeft) > 0 {
+		t.Fatal("bodyLeft gt zero:", string(bodyLeft))
+	}
+
+	body, err = zr.RespBody()
+	if err != nil || string(body) != "{" {
+		t.Fatal("reread body err")
+	}
+	if bodyStr, err := zr.RespBodyStringN(1); err != nil || bodyStr != "{" {
+		t.Fatal("reread body string n err")
+	}
+	if bodyStr, err := zr.RespBodyString(); err != nil || bodyStr != "{" {
+		t.Fatal("reread body string err")
+	}
+}
+
 func BenchmarkGet(b *testing.B) {
 	res := NormalRes{}
 	cli := NewClient(time.Second*30, 0, nil)

@@ -587,7 +587,16 @@ func (zr *ZRequest) RespBody() ([]byte, error) {
 	if !zr.ended {
 		return nil, ErrRequestNotComp
 	}
-	parseRespBody(zr)
+	parseRespBody(zr, 0)
+	return zr.respBody, zr.err
+}
+
+// RespBodyN read response body max n bytes
+func (zr *ZRequest) RespBodyN(n int64) ([]byte, error) {
+	if !zr.ended {
+		return nil, ErrRequestNotComp
+	}
+	parseRespBody(zr, n)
 	return zr.respBody, zr.err
 }
 
@@ -596,7 +605,19 @@ func (zr *ZRequest) RespBodyString() (string, error) {
 	if !zr.ended {
 		return "", ErrRequestNotComp
 	}
-	parseRespBody(zr)
+	parseRespBody(zr, 0)
+	if zr.err != nil {
+		return "", zr.err
+	}
+	return string(zr.respBody), nil
+}
+
+// RespBodyStringN read response body as string with max n bytes
+func (zr *ZRequest) RespBodyStringN(n int64) (string, error) {
+	if !zr.ended {
+		return "", ErrRequestNotComp
+	}
+	parseRespBody(zr, n)
 	if zr.err != nil {
 		return "", zr.err
 	}
@@ -643,10 +664,18 @@ func (zr *ZRequest) RespStatus() string {
 	return zr.resp.Status
 }
 
+// Decoder decode response body
+type Decoder interface {
+	Decode(v interface{}) error
+}
+
 // Unmarshal unmarshal respone(xml or json) into v
 func (zr *ZRequest) Unmarshal(v interface{}) error {
 	if !zr.ended {
 		return ErrRequestNotComp
+	}
+	if zr.err != nil {
+		return zr.err
 	}
 	if zr.resp == nil {
 		if zr.err != nil {
@@ -655,25 +684,25 @@ func (zr *ZRequest) Unmarshal(v interface{}) error {
 		return ErrRequestNotComp
 	}
 
-	parseRespBody(zr)
+	// copy to discard
+	defer func() {
+		io.Copy(ioutil.Discard, zr.resp.Body)
+		zr.resp.Body.Close()
+	}()
 
-	if zr.err != nil {
-		return zr.err
-	}
+	var decoder Decoder
 	respContentType := zr.resp.Header.Get(HdrContentType)
-	// xml
+
+	// xml or json
 	if xmlCheck.MatchString(respContentType) {
-		zr.err = xml.Unmarshal(zr.respBody, v)
-		if zr.err != nil {
-			zr.err = errors.New("xml.Unmarshal: " + zr.err.Error())
-			return zr.err
-		}
-		return nil
+		decoder = xml.NewDecoder(zr.resp.Body)
+	} else {
+		decoder = json.NewDecoder(zr.resp.Body)
 	}
-	// default json
-	zr.err = json.Unmarshal(zr.respBody, v)
+
+	zr.err = decoder.Decode(v)
 	if zr.err != nil {
-		zr.err = errors.New("json.Unmarshal: " + zr.err.Error())
+		zr.err = errors.New("decoder.Decode: " + zr.err.Error())
 		return zr.err
 	}
 	return nil
@@ -687,7 +716,7 @@ func (zr *ZRequest) Duration() time.Duration {
 	return zr.endTime.Sub(zr.startTime)
 }
 
-func parseRespBody(zr *ZRequest) {
+func parseRespBody(zr *ZRequest, n int64) {
 	if zr.err != nil {
 		return
 	}
@@ -699,8 +728,19 @@ func parseRespBody(zr *ZRequest) {
 	}
 	zr.respBodyParsed = true
 
-	defer zr.resp.Body.Close()
-	zr.respBody, zr.err = ioutil.ReadAll(zr.resp.Body)
+	// copy to discard
+	defer func() {
+		io.Copy(ioutil.Discard, zr.resp.Body)
+		zr.resp.Body.Close()
+	}()
+
+	// if n > 0 use limit reader
+	if n > 0 {
+		lr := io.LimitReader(zr.resp.Body, n)
+		zr.respBody, zr.err = ioutil.ReadAll(lr)
+	} else {
+		zr.respBody, zr.err = ioutil.ReadAll(zr.resp.Body)
+	}
 }
 
 // AnyToString any type parse into string
